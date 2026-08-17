@@ -6,7 +6,7 @@ Telegram бот для автоматического принятия выго�
 Добавлено:
 - WebSocket-слушатель (wss://wss10.mangabuff.ru) для мгновенного получения новых обменов.
 - Детект капчи по редиректу на /security/page-captcha с уведомлением оператору.
-- Адаптивный редкий опрос (/trades) как fallback (раз в 60–120 сек).
+- Адаптивный опрос (/trades) как fallback (базовый интервал 25 сек, максимум 60 сек).
 - Единая сессия и снижение числа запросов.
 """
 
@@ -808,13 +808,15 @@ def monitoring_loop(chat_id):
     # Запускаем WS
     start_ws(chat_id, auth)
 
-    bot.send_message(chat_id, f"🔁 Мониторинг обменов запущен (WebSocket + редкий опрос).\nПринимаются обмены, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, ...).")
+    # ОБНОВЛЁННОЕ СООБЩЕНИЕ: указан частый опрос
+    bot.send_message(chat_id, f"🔁 Мониторинг обменов запущен (WebSocket + опрос каждые ~25 сек).\nПринимаются обмены, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, ...).")
 
-    # Переменные для адаптивного интервала опроса
-    interval = 60  # начальный интервал (сек)
-    max_interval = 120
+    # Переменные для адаптивного интервала (умеренное увеличение)
+    base_interval = 25           # базовый интервал (сек)
+    max_interval = 60            # максимум при простое
+    interval = base_interval
     empty_count = 0
-    last_trade_time = 0
+    empty_threshold = 6          # после скольких пустых проверок начинаем увеличивать интервал
 
     while monitoring_active:
         # Проверяем паузу из-за капчи
@@ -824,36 +826,30 @@ def monitoring_loop(chat_id):
                 continue
 
         try:
-            # Редкий опрос как fallback
             trades = get_trades(auth, chat_id=chat_id)
-            # Проверка капчи уже выполнена внутри get_trades
             if captcha_paused:
-                # если капча обнаружена, get_trades вызвал обработчик и вернул []
-                # продолжаем цикл, но пауза уже установлена
                 continue
 
-            # Фильтруем новые
             new_trades = [t for t in trades if t['trade_id'] not in processed_trades]
             if new_trades:
                 empty_count = 0
-                interval = 60  # сбрасываем на базовый
+                interval = base_interval
                 for trade in new_trades:
-                    # Обрабатываем (но WS уже мог обработать, но дублирование не страшно)
                     if trade['trade_id'] not in processed_trades:
                         process_new_trade(chat_id, auth, trade['trade_id'])
             else:
                 empty_count += 1
-                # Увеличиваем интервал, но не более max_interval
-                if empty_count > 3:
-                    interval = min(interval + 10, max_interval)
+                # Увеличиваем интервал только если пусто уже много раз, но плавно
+                if empty_count > empty_threshold:
+                    interval = min(interval + 5, max_interval)
                 else:
-                    interval = 60  # пока держим базовый
+                    interval = base_interval  # держим базовый, пока не накопится пустых проверок
 
-            # Добавляем джиттер (±10%)
+            # Джиттер ±10%
             jitter = random.uniform(-0.1, 0.1) * interval
-            sleep_time = max(30, interval + jitter)
+            sleep_time = max(15, interval + jitter)  # не меньше 15 секунд
 
-            # Ждём с проверкой на остановку
+            # Сон с проверкой флагов
             for _ in range(int(sleep_time)):
                 if not monitoring_active or captcha_paused:
                     break
